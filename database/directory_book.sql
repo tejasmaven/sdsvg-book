@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS `directory_book` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `group_name` VARCHAR(255) NOT NULL,
+    `group_address` TEXT NULL,
+    `last_name` VARCHAR(255) NULL,
+    `title` VARCHAR(100) NULL,
+    `first_name` VARCHAR(255) NULL,
+    `middle_name` VARCHAR(255) NULL,
+    `member_name` VARCHAR(512) NOT NULL,
+    `gender` VARCHAR(50) NULL,
+    `relationship` VARCHAR(100) NULL,
+    `dob` DATE NULL,
+    `dob_display` VARCHAR(50) NULL,
+    `education` VARCHAR(255) NULL,
+    `mobile` VARCHAR(100) NULL,
+    `email` VARCHAR(255) NULL,
+    `address` TEXT NULL,
+    `order_flag` VARCHAR(10) NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    INDEX `idx_group_name` (`group_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
