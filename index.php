@@ -2,13 +2,28 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/lib/SimpleXLSX.php';
+require_once __DIR__ . '/lib/Database.php';
 
+use SDSVGBook\Database;
 use Shuchkin\SimpleXLSX;
 
 $error = null;
+$databaseError = null;
 $tableGroups = [];
 $hasUpload = false;
 $selectedFileName = '';
+$pdo = null;
+
+try {
+    $config = require __DIR__ . '/config/database.php';
+    if (!is_array($config)) {
+        throw new \RuntimeException('The database configuration file must return an array.');
+    }
+
+    $pdo = (new Database($config))->getConnection();
+} catch (\Throwable $exception) {
+    $databaseError = 'Unable to connect to the database. Please verify your configuration.';
+}
 
 function normalize_header_key(string $header): string
 {
@@ -140,6 +155,214 @@ function display_multiline(?string $value): string
     return nl2br(htmlspecialchars($normalized, ENT_QUOTES, 'UTF-8'));
 }
 
+function normalize_dob_iso($value): ?string
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+
+    if (is_numeric($value)) {
+        $days = (float) $value;
+        if ($days > 0) {
+            $timestamp = (int) round(($days - 25569) * 86400);
+            if ($timestamp >= 0) {
+                return gmdate('Y-m-d', $timestamp);
+            }
+        }
+    }
+
+    if (is_string($value)) {
+        $clean = trim($value);
+        if ($clean === '') {
+            return null;
+        }
+
+        $formats = ['Y-m-d', 'd/m/Y', 'm/d/Y', 'd-m-Y', 'm-d-Y', 'd.m.Y', 'd M Y', 'j M Y'];
+        foreach ($formats as $format) {
+            $date = \DateTimeImmutable::createFromFormat($format, $clean);
+            if ($date instanceof \DateTimeImmutable) {
+                return $date->format('Y-m-d');
+            }
+        }
+
+        $timestamp = strtotime($clean);
+        if ($timestamp !== false) {
+            return date('Y-m-d', $timestamp);
+        }
+    }
+
+    return null;
+}
+
+function save_directory_book(\PDO $pdo, array $groups): void
+{
+    $pdo->beginTransaction();
+
+    try {
+        $pdo->exec('TRUNCATE TABLE `directory_book`');
+
+        $statement = $pdo->prepare(
+            'INSERT INTO `directory_book` (
+                group_name,
+                group_address,
+                last_name,
+                title,
+                first_name,
+                middle_name,
+                member_name,
+                gender,
+                relationship,
+                dob,
+                dob_display,
+                education,
+                mobile,
+                email,
+                address,
+                order_flag
+            ) VALUES (
+                :group_name,
+                :group_address,
+                :last_name,
+                :title,
+                :first_name,
+                :middle_name,
+                :member_name,
+                :gender,
+                :relationship,
+                :dob,
+                :dob_display,
+                :education,
+                :mobile,
+                :email,
+                :address,
+                :order_flag
+            )'
+        );
+
+        foreach ($groups as $group) {
+            $groupName = $group['name'] ?? '';
+            $groupAddress = $group['address'] ?? '';
+
+            if (!isset($group['rows']) || !is_array($group['rows'])) {
+                continue;
+            }
+
+            foreach ($group['rows'] as $member) {
+                $statement->execute([
+                    ':group_name' => $groupName,
+                    ':group_address' => $groupAddress,
+                    ':last_name' => $member['last_name'] ?? '',
+                    ':title' => $member['title'] ?? '',
+                    ':first_name' => $member['first_name'] ?? '',
+                    ':middle_name' => $member['middle_name'] ?? '',
+                    ':member_name' => $member['member_name'] ?? '',
+                    ':gender' => $member['gender'] ?? '',
+                    ':relationship' => $member['relationship'] ?? '',
+                    ':dob' => $member['dob_iso'] ?? null,
+                    ':dob_display' => $member['dob'] ?? '',
+                    ':education' => $member['education'] ?? '',
+                    ':mobile' => $member['mobile'] ?? '',
+                    ':email' => $member['email'] ?? '',
+                    ':address' => $member['address'] ?? '',
+                    ':order_flag' => $member['order_flag'] ?? '',
+                ]);
+            }
+        }
+
+        $pdo->commit();
+    } catch (\Throwable $exception) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        throw $exception;
+    }
+}
+
+function load_table_groups_from_database(\PDO $pdo): array
+{
+    $sql = 'SELECT
+                id,
+                group_name,
+                group_address,
+                last_name,
+                title,
+                first_name,
+                middle_name,
+                member_name,
+                gender,
+                relationship,
+                dob_display,
+                education,
+                mobile,
+                email,
+                address,
+                order_flag
+            FROM `directory_book`
+            ORDER BY
+                group_name,
+                CASE WHEN UPPER(COALESCE(order_flag, "")) = "P" THEN 0 ELSE 1 END,
+                LOWER(COALESCE(last_name, "")),
+                LOWER(COALESCE(first_name, "")),
+                id';
+
+    $statement = $pdo->query($sql);
+
+    $groups = [];
+    while ($row = $statement->fetch(\PDO::FETCH_ASSOC)) {
+        $groupName = isset($row['group_name']) && trim((string) $row['group_name']) !== ''
+            ? (string) $row['group_name']
+            : 'Ungrouped';
+
+        if (!isset($groups[$groupName])) {
+            $groups[$groupName] = [
+                'name' => $groupName,
+                'address' => trim((string) ($row['group_address'] ?? $row['address'] ?? '')),
+                'rows' => [],
+            ];
+        }
+
+        $currentAddress = trim((string) ($groups[$groupName]['address'] ?? ''));
+        $rowAddress = trim((string) ($row['group_address'] ?? $row['address'] ?? ''));
+        if ($currentAddress === '' && $rowAddress !== '') {
+            $groups[$groupName]['address'] = $rowAddress;
+        }
+
+        $groups[$groupName]['rows'][] = [
+            'member_name' => $row['member_name'] ?? build_member_name(
+                (string) ($row['last_name'] ?? ''),
+                (string) ($row['title'] ?? ''),
+                (string) ($row['first_name'] ?? ''),
+                (string) ($row['middle_name'] ?? '')
+            ),
+            'gender' => $row['gender'] ?? '',
+            'relationship' => $row['relationship'] ?? '',
+            'dob' => $row['dob_display'] ?? '',
+            'education' => $row['education'] ?? '',
+            'mobile' => $row['mobile'] ?? '',
+            'email' => $row['email'] ?? '',
+            'address' => $row['address'] ?? '',
+            'order_flag' => strtoupper(trim((string) ($row['order_flag'] ?? ''))),
+        ];
+    }
+
+    foreach ($groups as &$group) {
+        $group['row_count'] = count($group['rows']);
+    }
+    unset($group);
+
+    return array_values($groups);
+}
+
+if ($pdo instanceof \PDO) {
+    try {
+        $tableGroups = load_table_groups_from_database($pdo);
+    } catch (\Throwable $exception) {
+        $databaseError = 'Unable to load data from the database. Ensure the directory_book table exists (see database/directory_book.sql).';
+        $tableGroups = [];
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
     $hasUpload = true;
     $selectedFileName = $_FILES['excelFile']['name'] ?? '';
@@ -195,6 +418,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                     if ($missing) {
                         $error = 'Missing required column(s): ' . implode(', ', $missing) . '.';
                     } else {
+                        $parsedGroups = [];
                         $groupIndex = [];
 
                         foreach ($rows as $row) {
@@ -234,8 +458,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                             $orderFlag = strtoupper($orderFlag);
 
                             if (!isset($groupIndex[$groupLabel])) {
-                                $groupIndex[$groupLabel] = count($tableGroups);
-                                $tableGroups[] = [
+                                $groupIndex[$groupLabel] = count($parsedGroups);
+                                $parsedGroups[] = [
                                     'name' => $groupLabel,
                                     'address' => $address,
                                     'rows' => [],
@@ -243,15 +467,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                             }
 
                             $groupPosition = $groupIndex[$groupLabel];
-                            if ($tableGroups[$groupPosition]['address'] === '' && $address !== '') {
-                                $tableGroups[$groupPosition]['address'] = $address;
+                            if ($parsedGroups[$groupPosition]['address'] === '' && $address !== '') {
+                                $parsedGroups[$groupPosition]['address'] = $address;
                             }
 
-                            $tableGroups[$groupPosition]['rows'][] = [
+                            $parsedGroups[$groupPosition]['rows'][] = [
                                 'member_name' => build_member_name($lastName, $title, $firstName, $middleName),
+                                'last_name' => $lastName,
+                                'first_name' => $firstName,
+                                'middle_name' => $middleName,
+                                'title' => $title,
                                 'gender' => $gender,
                                 'relationship' => $relationship,
                                 'dob' => $dobDisplay,
+                                'dob_iso' => normalize_dob_iso($dobCell ?? cell_value($row, $headerMap, 'dob')),
                                 'education' => $education,
                                 'mobile' => $mobile,
                                 'email' => $email,
@@ -262,7 +491,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                             ];
                         }
 
-                        foreach ($tableGroups as &$group) {
+                        foreach ($parsedGroups as &$group) {
                             if (empty($group['rows'])) {
                                 continue;
                             }
@@ -290,8 +519,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                         }
                         unset($group);
 
-                        if (empty($tableGroups)) {
+                        if (empty($parsedGroups)) {
                             $error = 'No member rows were found in the uploaded Excel file.';
+                        } elseif ($pdo instanceof \PDO) {
+                            try {
+                                save_directory_book($pdo, $parsedGroups);
+                                $tableGroups = load_table_groups_from_database($pdo);
+                            } catch (\Throwable $exception) {
+                                $error = 'Unable to save imported data to the database.';
+                            }
+                        } else {
+                            $error = 'Database connection is not available, so the imported data could not be saved.';
                         }
                     }
                 }
@@ -411,11 +649,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                 </div>
                 <p class="mt-4 text-secondary">Upload the member Excel sheet to view responsive records laid out as in the PDF reference.</p>
 
+                <?php if ($databaseError !== null): ?>
+                    <div class="alert alert-warning" role="alert">
+                        <?= htmlspecialchars($databaseError, ENT_QUOTES, 'UTF-8') ?>
+                    </div>
+                <?php endif; ?>
+
                 <?php if ($error !== null): ?>
                     <div class="alert alert-danger" role="alert">
                         <?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?>
                     </div>
-                <?php elseif ($hasUpload && !empty($tableGroups)): ?>
+                <?php elseif (!empty($tableGroups)): ?>
                     <div class="table-responsive mt-4">
                         <table class="table table-bordered align-middle member-table">
                             <thead>
