@@ -66,6 +66,26 @@ function cell_value(array $row, array $headerMap, string $column): string
     return '';
 }
 
+function normalize_order_flag(?string $value): string
+{
+    $normalized = strtoupper(trim((string) $value));
+
+    if ($normalized === 'P' || $normalized === 'S') {
+        return $normalized;
+    }
+
+    return '';
+}
+
+function describe_order_flag(?string $value): string
+{
+    return match (normalize_order_flag($value)) {
+        'P' => 'Parent',
+        'S' => 'Child',
+        default => '',
+    };
+}
+
 function row_has_content(array $row, array $headerMap): bool
 {
     foreach ($headerMap as $index) {
@@ -264,7 +284,9 @@ function save_directory_book(\PDO $pdo, array $groups): void
                     ':mobile' => $member['mobile'] ?? '',
                     ':email' => $member['email'] ?? '',
                     ':address' => $member['address'] ?? '',
-                    ':order_flag' => $member['order_flag'] ?? '',
+                    ':order_flag' => isset($member['order_flag']) && $member['order_flag'] !== ''
+                        ? $member['order_flag']
+                        : null,
                 ]);
             }
         }
@@ -342,7 +364,8 @@ function load_table_groups_from_database(\PDO $pdo): array
             'mobile' => $row['mobile'] ?? '',
             'email' => $row['email'] ?? '',
             'address' => $row['address'] ?? '',
-            'order_flag' => strtoupper(trim((string) ($row['order_flag'] ?? ''))),
+            'order_flag' => normalize_order_flag($row['order_flag'] ?? null),
+            'order_flag_label' => describe_order_flag($row['order_flag'] ?? null),
         ];
     }
 
@@ -447,6 +470,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
 
                             $orderFlag = cell_value($row, $headerMap, 'record');
                             if ($orderFlag === '') {
+                                $orderFlag = cell_value($row, $headerMap, 'p/s');
+                            }
+                            if ($orderFlag === '') {
+                                $orderFlag = cell_value($row, $headerMap, 'p_s');
+                            }
+                            if ($orderFlag === '') {
                                 $orderFlag = cell_value($row, $headerMap, 'p');
                             }
                             if ($orderFlag === '' && $relationship !== '') {
@@ -455,7 +484,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                                     $orderFlag = 'P';
                                 }
                             }
-                            $orderFlag = strtoupper($orderFlag);
+                            $orderFlag = normalize_order_flag($orderFlag);
 
                             if (!isset($groupIndex[$groupLabel])) {
                                 $groupIndex[$groupLabel] = count($parsedGroups);
@@ -486,6 +515,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                                 'email' => $email,
                                 'address' => $address,
                                 'order_flag' => $orderFlag,
+                                'order_flag_label' => describe_order_flag($orderFlag),
                                 'last_name_sort' => $lastName,
                                 'first_name_sort' => $firstName,
                             ];
@@ -666,6 +696,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                                 <tr>
                                     <th scope="col" class="text-center">No.</th>
                                     <th scope="col">Name</th>
+                                    <th scope="col">Member Type</th>
                                     <th scope="col">Gender</th>
                                     <th scope="col">Relation</th>
                                     <th scope="col">DOB</th>
@@ -684,7 +715,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                                     $groupNumber++;
                                     ?>
                                     <tr class="group-header-row">
-                                        <td colspan="9">Group: <?= htmlspecialchars($group['name'], ENT_QUOTES, 'UTF-8') ?></td>
+                                        <td colspan="10">Group: <?= htmlspecialchars($group['name'], ENT_QUOTES, 'UTF-8') ?></td>
                                     </tr>
                                     <?php $rowspan = $group['row_count'] ?? count($group['rows']); ?>
                                     <?php foreach ($group['rows'] as $index => $member): ?>
@@ -693,6 +724,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                                                 <td rowspan="<?= (int) $rowspan ?>" class="srno-cell align-middle"><?= $groupNumber ?></td>
                                             <?php endif; ?>
                                             <td><?= display_value($member['member_name']) ?></td>
+                                            <td><?= display_value($member['order_flag_label'] ?? '') ?></td>
                                             <td><?= display_value($member['gender']) ?></td>
                                             <td><?= display_value($member['relationship']) ?></td>
                                             <td><?= display_value($member['dob']) ?></td>
