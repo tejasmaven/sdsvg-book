@@ -9,7 +9,7 @@ use Shuchkin\SimpleXLSX;
 
 $error = null;
 $databaseError = null;
-$tableGroups = [];
+$tableRows = [];
 $hasUpload = false;
 $selectedFileName = '';
 $pdo = null;
@@ -301,8 +301,9 @@ function save_directory_book(\PDO $pdo, array $groups): void
     }
 }
 
-function load_table_groups_from_database(\PDO $pdo): array
+function load_table_rows(\PDO $pdo): array
 {
+    // Step 1: Run a query to fetch data and save it in an array
     $sql = 'SELECT
                 id,
                 group_name,
@@ -330,27 +331,28 @@ function load_table_groups_from_database(\PDO $pdo): array
 
     $statement = $pdo->query($sql);
 
-    $groups = [];
+    $rows = [];
+    $groupRowCounts = [];
+    $groupAddresses = [];
+
     while ($row = $statement->fetch(\PDO::FETCH_ASSOC)) {
         $groupName = isset($row['group_name']) && trim((string) $row['group_name']) !== ''
             ? (string) $row['group_name']
             : 'Ungrouped';
 
-        if (!isset($groups[$groupName])) {
-            $groups[$groupName] = [
-                'name' => $groupName,
-                'address' => trim((string) ($row['group_address'] ?? $row['address'] ?? '')),
-                'rows' => [],
-            ];
+        $address = trim((string) ($row['group_address'] ?? $row['address'] ?? ''));
+
+        if (!isset($groupRowCounts[$groupName])) {
+            $groupRowCounts[$groupName] = 0;
+        }
+        $groupRowCounts[$groupName] += 1;
+
+        if ($address !== '' && !isset($groupAddresses[$groupName])) {
+            $groupAddresses[$groupName] = $address;
         }
 
-        $currentAddress = trim((string) ($groups[$groupName]['address'] ?? ''));
-        $rowAddress = trim((string) ($row['group_address'] ?? $row['address'] ?? ''));
-        if ($currentAddress === '' && $rowAddress !== '') {
-            $groups[$groupName]['address'] = $rowAddress;
-        }
-
-        $groups[$groupName]['rows'][] = [
+        $rows[] = [
+            'group' => $groupName,
             'member_name' => $row['member_name'] ?? build_member_name(
                 (string) ($row['last_name'] ?? ''),
                 (string) ($row['title'] ?? ''),
@@ -363,26 +365,28 @@ function load_table_groups_from_database(\PDO $pdo): array
             'education' => $row['education'] ?? '',
             'mobile' => $row['mobile'] ?? '',
             'email' => $row['email'] ?? '',
-            'address' => $row['address'] ?? '',
-            'order_flag' => normalize_order_flag($row['order_flag'] ?? null),
+            'address' => $address,
             'order_flag_label' => describe_order_flag($row['order_flag'] ?? null),
         ];
     }
 
-    foreach ($groups as &$group) {
-        $group['row_count'] = count($group['rows']);
+    // Step 2: Setup rowspan values and group addresses for display
+    foreach ($rows as &$rowData) {
+        $groupName = $rowData['group'];
+        $rowData['rowspan'] = $groupRowCounts[$groupName] ?? 1;
+        $rowData['group_address'] = $groupAddresses[$groupName] ?? $rowData['address'];
     }
-    unset($group);
+    unset($rowData);
 
-    return array_values($groups);
+    return $rows;
 }
 
 if ($pdo instanceof \PDO) {
     try {
-        $tableGroups = load_table_groups_from_database($pdo);
+        $tableRows = load_table_rows($pdo);
     } catch (\Throwable $exception) {
         $databaseError = 'Unable to load data from the database. Ensure the directory_book table exists (see database/directory_book.sql).';
-        $tableGroups = [];
+        $tableRows = [];
     }
 }
 
@@ -554,7 +558,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                         } elseif ($pdo instanceof \PDO) {
                             try {
                                 save_directory_book($pdo, $parsedGroups);
-                                $tableGroups = load_table_groups_from_database($pdo);
+                                $tableRows = load_table_rows($pdo);
                             } catch (\Throwable $exception) {
                                 $error = 'Unable to save imported data to the database.';
                             }
@@ -689,7 +693,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                     <div class="alert alert-danger" role="alert">
                         <?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?>
                     </div>
-                <?php elseif (!empty($tableGroups)): ?>
+                <?php elseif (!empty($tableRows)): ?>
                     <div class="table-responsive mt-4">
                         <table class="table table-bordered align-middle member-table">
                             <thead>
@@ -707,35 +711,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['excelFile'])) {
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php $groupNumber = 0; ?>
-                                <?php foreach ($tableGroups as $group): ?>
-                                    <?php if (empty($group['rows'])) {
-                                        continue;
-                                    }
-                                    $groupNumber++;
+                                <?php
+                                    $groupNumber = 0;
+                                    $currentGroup = null;
+                                    $groupRowIndex = 0;
+                                    $currentRowspan = 0;
+                                    $currentAddress = '';
+                                ?>
+                                <!-- Step 3: Display table data using the prepared array -->
+                                <?php foreach ($tableRows as $row): ?>
+                                    <?php
+                                        if ($row['group'] !== $currentGroup) {
+                                            $currentGroup = $row['group'];
+                                            $groupNumber++;
+                                            $groupRowIndex = 0;
+                                            $currentRowspan = $row['rowspan'] ?? 1;
+                                            $currentAddress = $row['group_address'] ?? '';
                                     ?>
                                     <tr class="group-header-row">
-                                        <td colspan="10">Group: <?= htmlspecialchars($group['name'], ENT_QUOTES, 'UTF-8') ?></td>
+                                        <td colspan="10">Group: <?= htmlspecialchars($currentGroup, ENT_QUOTES, 'UTF-8') ?></td>
                                     </tr>
-                                    <?php $rowspan = $group['row_count'] ?? count($group['rows']); ?>
-                                    <?php foreach ($group['rows'] as $index => $member): ?>
-                                        <tr>
-                                            <?php if ($index === 0): ?>
-                                                <td rowspan="<?= (int) $rowspan ?>" class="srno-cell align-middle"><?= $groupNumber ?></td>
-                                            <?php endif; ?>
-                                            <td><?= display_value($member['member_name']) ?></td>
-                                            <td><?= display_value($member['order_flag_label'] ?? '') ?></td>
-                                            <td><?= display_value($member['gender']) ?></td>
-                                            <td><?= display_value($member['relationship']) ?></td>
-                                            <td><?= display_value($member['dob']) ?></td>
-                                            <td><?= display_value($member['education']) ?></td>
-                                            <td><?= display_value($member['mobile']) ?></td>
-                                            <td><?= display_value($member['email']) ?></td>
-                                            <?php if ($index === 0): ?>
-                                                <td rowspan="<?= (int) $rowspan ?>" class="address-cell align-middle"><?= display_multiline($group['address']) ?></td>
-                                            <?php endif; ?>
-                                        </tr>
-                                    <?php endforeach; ?>
+                                    <?php
+                                        }
+                                    ?>
+                                    <tr>
+                                        <?php if ($groupRowIndex === 0): ?>
+                                            <td rowspan="<?= (int) $currentRowspan ?>" class="srno-cell align-middle"><?= $groupNumber ?></td>
+                                        <?php endif; ?>
+                                        <td><?= display_value($row['member_name']) ?></td>
+                                        <td><?= display_value($row['order_flag_label'] ?? '') ?></td>
+                                        <td><?= display_value($row['gender']) ?></td>
+                                        <td><?= display_value($row['relationship']) ?></td>
+                                        <td><?= display_value($row['dob']) ?></td>
+                                        <td><?= display_value($row['education']) ?></td>
+                                        <td><?= display_value($row['mobile']) ?></td>
+                                        <td><?= display_value($row['email']) ?></td>
+                                        <?php if ($groupRowIndex === 0): ?>
+                                            <td rowspan="<?= (int) $currentRowspan ?>" class="address-cell align-middle"><?= display_multiline($currentAddress) ?></td>
+                                        <?php endif; ?>
+                                    </tr>
+                                    <?php $groupRowIndex++; ?>
                                 <?php endforeach; ?>
                             </tbody>
                         </table>
